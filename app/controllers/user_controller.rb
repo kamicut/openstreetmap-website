@@ -1,21 +1,21 @@
 class UserController < ApplicationController
   layout "site", :except => [:api_details]
 
-  skip_before_action :verify_authenticity_token, :only => [:api_read, :api_details, :api_gpx_files, :auth_success]
+  skip_before_action :verify_authenticity_token, :only => [:api_read, :api_details, :api_gpx_files, :api_discussions, :auth_success]
   before_action :disable_terms_redirect, :only => [:terms, :save, :logout, :api_details]
-  before_action :authorize, :only => [:api_details, :api_gpx_files]
-  before_action :authorize_web, :except => [:api_read, :api_details, :api_gpx_files]
-  before_action :set_locale, :except => [:api_read, :api_details, :api_gpx_files]
+  before_action :authorize, :only => [:api_details, :api_gpx_files, :api_discussions]
+  before_action :authorize_web, :except => [:api_read, :api_details, :api_gpx_files, :api_discussions]
+  before_action :set_locale, :except => [:api_read, :api_details, :api_gpx_files, :api_discussions]
   before_action :require_user, :only => [:account, :go_public, :make_friend, :remove_friend]
   before_action :require_self, :only => [:account]
-  before_action :check_database_readable, :except => [:login, :api_read, :api_details, :api_gpx_files]
+  before_action :check_database_readable, :except => [:login, :api_read, :api_details, :api_gpx_files, :api_discussions]
   before_action :check_database_writable, :only => [:new, :account, :confirm, :confirm_email, :lost_password, :reset_password, :go_public, :make_friend, :remove_friend]
-  before_action :check_api_readable, :only => [:api_read, :api_details, :api_gpx_files]
+  before_action :check_api_readable, :only => [:api_read, :api_details, :api_gpx_files, :api_discussions]
   before_action :require_allow_read_prefs, :only => [:api_details]
   before_action :require_allow_read_gpx, :only => [:api_gpx_files]
   before_action :require_cookies, :only => [:new, :login, :confirm]
   before_action :require_administrator, :only => [:set_status, :delete, :list]
-  around_action :api_call_handle_error, :only => [:api_read, :api_details, :api_gpx_files]
+  around_action :api_call_handle_error, :only => [:api_read, :api_details, :api_gpx_files, :api_discussions]
   before_action :lookup_user_by_id, :only => [:api_read]
   before_action :lookup_user_by_name, :only => [:set_status, :delete]
   before_action :allow_thirdparty_images, :only => [:view, :account]
@@ -395,6 +395,45 @@ class UserController < ApplicationController
       doc.root << trace.to_xml_node
     end
     render :xml => doc.to_s
+  end
+
+  def api_discussions
+    comments = ChangesetComment.order("changeset_comments.created_at DESC")
+    .includes(:author, :changeset, :changeset => [:user, :changeset_tags])
+    .joins(:changeset)
+    .joins("inner join changesets_subscribers on changesets.id = changesets_subscribers.changeset_id")
+    .where("changesets_subscribers.subscriber_id = ?", current_user)
+
+    discussions = comments.group_by { |comment| comment.changeset.id }
+
+    el1 = XML::Node.new("discussions")
+    discussions.each do |changeset_id, comments|
+      el2 = XML::Node.new("changeset")
+      changeset = comments[0].changeset
+      el2["id"] = changeset_id.to_s
+      el2["num_comments"] = comments.count.to_s
+
+      # Add bbox 
+      bbox = changeset.bbox
+      bbox.to_unscaled.add_bounds_to(el2, "_") if bbox.complete? 
+   
+      el2["user"] = changeset.user.display_name
+      el2["uid"] = changeset.user.id.to_s
+
+      comments.each do |comment|
+        el3 = XML::Node.new("comment")
+        el3["date"] = comment.created_at.xmlschema
+        el3["uid"] = comment.author.id.to_s if comment.author.data_public?
+        el3["user"] = comment.author.display_name.to_s if comment.author.data_public?
+        el4 = XML::Node.new("text")
+        el4.content = comment.body.to_s
+        el3 << el4
+        el2 << el3
+      end 
+      el1 << el2
+    end
+
+    render :xml => el1.to_s
   end
 
   def view
